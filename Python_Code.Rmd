@@ -1,0 +1,1069 @@
+---
+title: "STAT232_PJT"
+author: 
+  - Group MESS
+  - Mehr Un Nisa Tariq
+  - Eunyoung Kwak
+  - Sahana RajeshLal
+  - Subbareddy Bhumireddy Venkata
+date: "2024-03-22"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+### 1. Introduction
+
+Life expectancy, reflects the average number of years a person born today is expected to live. It's a powerful indicator of a population's health, influenced by various factors like access to healthcare, nutrition, and environmental conditions. Understanding life expectancy trends across countries and over time provides valuable insights into societal progress and areas where improvements are needed. 
+
+#### 1.1 Background of the data
+
+We found our dataset on Kaggle under the name "Life Expectancy Data". It has 2848 rows and 23 columns. It has data sourced from Global Health Observatory (GHO) data repository under World Health Organization (WHO). Our dataset has 16 years worth of data for 178 countries. For our project, we are aiming to predict life expectancy using predictors such as health-related factors, including immunization coverage for diseases like Hepatitis B, Polio, and Diphtheria, alongside mortality rates, economic indicators, and social determinants. 
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(maps)
+library(mapproj)
+library(gridExtra)
+library(ggcorrplot)
+library(dplyr)
+library(caret)
+library(glmnet)
+```
+
+**Loading the dataset**
+```{r}
+led <- read.csv("Life Expectancy Data.csv") ## Life Expectancy DataSet
+countries <- read.csv("countries.csv")      ## Latitude and longitude information by country
+
+dim(led)
+
+
+led %>%
+group_by(Region, Country, Year) %>%
+  summarise(cnt = n(), .groups="drop")
+```
+
+#### 1.2 Variables of interest
+
+Initially, our dataset comprised of 22 predictor variables. However, our objective is to reduce this number through exploratory data analysis, correlation analysis, and the forward selection method. Our predictor names, its type and glimpse of the data is shown below. 
+
+```{r}
+glimpse(led)
+```
+
+```{r}
+led_year <- select(led, c(Life_expectancy, Year, Economy_status_Developed)) %>%
+  mutate(Economy_status = ifelse(Economy_status_Developed==0, "Developing", "Developed")) %>%
+  group_by(Year, Economy_status) %>%
+  summarise(mean_Life_expectancy = mean(Life_expectancy), .groups="drop")
+
+ggplot(data=led_year) +
+  geom_point(aes(Year, mean_Life_expectancy, color=as.factor(Economy_status))) +
+  labs(color = "Economy Status") +
+  ggtitle("Life expectancy in years by economic status")
+```
+
+* Life expectancy in years by economic status: Life expectancy is trending upward each year, with developed countries living about 10 to 13 years longer than developing countries. It's worth noting here that the gap, which was 12.81 years in 2000, has been gradually shrinking to 10.86 years in 2015.
+
+#### 1.3 Business questions can be answered using these data
+
+Some of the business questions we can answer from this dataset are:
+
+* Is there a relationship between the predictors (such as "Economy_status_Developed", "Adult_mortality", "Alcohol_consumption", etc.) and life expectancy?
+* How strong is the relationship between life expectancy and other predictors?
+
+### 2. Exploratory Data Analysis
+
+#### 2.1 Data cleaning (missing data and anomaly removal, summary and aggregation)
+
+* For better results, we are only going to use one year data since it can be challenging to deal with 16 years worth of data.
+* The most recent data is from 2015, but we decided to use 2014 data because some data was missing.
+
+```{r}
+led <- filter(led, Year==2014)
+head(led,5)
+```
+
+* Check for missing values in the data.
+```{r}
+which(is.na(led))
+```
+
+* Drop unnecessary columns: drop the Year variable because it only has 2014 as a value.
+```{r}
+led <- select(led, -Year)
+head(led, 5)
+```
+
+
+* Data preparation for data visualization on a map
+  - Three datasets are used to visualize data on a map: (1) A copy of Life Expectancy Dataset (`life_data`) (2) Latitude and longitude information dataset for each country (`countries`) (3) World dataset from the map library. (`world_map`)
+  - In this task, we matched country names that did not match each other between the data.
+  
+```{r}
+world_map <- map_data("world")  # World dataset from the map library.
+life_data <- led                # Life Expectancy Dataset
+
+## We found country names in the Life Expectancy dataset
+## that do not match country names in the world_map dataset.
+setdiff(life_data$Country, world_map$region)
+```
+
+```{r}
+# We separated country names in a Life Expectancy dataset that are stored separately
+# in the world_map dataset (e.g., "Antigua and Barbuda" -> "Antigua", "Barbuda").
+
+modify_row <- life_data[which(grepl("^Antigua", life_data$Country)), ]
+modify_row[,1] <- "Barbuda"
+life_data <- bind_rows(life_data, modify_row) # Antigua and Barbuda
+
+modify_row <- life_data[which(grepl("^St. Vincent", life_data$Country)), ]
+modify_row[,1] <- "Grenadines"
+life_data <- bind_rows(life_data, modify_row) # St. Vincent and the Grenadines
+
+modify_row <- life_data[which(grepl("^Trinidad", life_data$Country)), ]
+modify_row[,1] <- "Tobago"
+life_data <- bind_rows(life_data, modify_row) # Trinidad and Tobago
+```
+
+```{r}
+# We separated country names in a countries dataset that are stored separately
+# in the world_map dataset (e.g., "Antigua and Barbuda" -> "Antigua", "Barbuda").
+
+#Antigua and Barbuda
+countries[which(grepl("^Antigua", countries$name)), 2] <- 17.0858167
+countries[which(grepl("^Antigua", countries$name)), 3] <- -61.8719898
+countries[which(grepl("^Antigua", countries$name)), 4] <- "Antigua"
+modify_row <- data.frame(country="AC", latitude=17.5334104, longitude=-61.9829475,
+                         name="Barbuda")
+countries <- bind_rows(countries, modify_row)
+
+# St. Vincent and the Grenadines
+countries[which(grepl("^Saint Vincent", countries$name)), 2] <- 12.9934556
+countries[which(grepl("^Saint Vincent", countries$name)), 3] <- -61.5553909
+countries[which(grepl("^Saint Vincent", countries$name)), 4] <- "Saint Vincent"
+modify_row <- data.frame(country="VC", latitude=12.915801, longitude=-61.5407944,
+                         name="Grenadines")
+countries <- bind_rows(countries, modify_row)
+
+# Trinidad and Tobago
+countries[which(grepl("^Trinidad", countries$name)), 2] <- 10.6973579
+countries[which(grepl("^Trinidad", countries$name)), 3] <- -61.8712057
+countries[which(grepl("^Trinidad", countries$name)), 4] <- "Trinidad"
+modify_row <- data.frame(country="TT", latitude=11.2404458, longitude=-60.7639678,
+                         name="Tobago")
+countries <- bind_rows(countries, modify_row)
+```
+
+```{r}
+## We changed the country names in the Life Expectancy dataset
+## to match the country names in the world_map dataset.
+
+life_data[which(grepl("^Antigua", life_data$Country)), 1] <- "Antigua"
+life_data[which(grepl("^Bahamas", life_data$Country)), 1] <- "Bahamas"
+life_data[which(grepl("^Brunei", life_data$Country)), 1] <- "Brunei"
+life_data[which(grepl("^Cabo", life_data$Country)), 1] <- "Cape Verde"
+life_data[which(grepl("^Congo, Dem.", life_data$Country)), 1] <- "Democratic Republic of the Congo"
+life_data[which(grepl("^Congo, Rep.", life_data$Country)), 1] <- "Republic of Congo"
+life_data[which(grepl("^Czechia", life_data$Country)), 1] <- "Czech Republic"
+life_data[which(grepl("^Egypt", life_data$Country)), 1] <- "Egypt"
+life_data[which(grepl("^Eswatini", life_data$Country)), 1] <- "Swaziland"
+life_data[which(grepl("^Gambia", life_data$Country)), 1] <- "Gambia"
+life_data[which(grepl("^Iran", life_data$Country)), 1] <- "Iran"
+life_data[which(grepl("^Kyrgyz", life_data$Country)), 1] <- "Kyrgyzstan"
+life_data[which(grepl("^Lao", life_data$Country)), 1] <- "Laos"
+life_data[which(grepl("^Micronesia", life_data$Country)), 1] <- "Micronesia"
+life_data[which(grepl("^Russian", life_data$Country)), 1] <- "Russia"
+life_data[which(grepl("^Slovak", life_data$Country)), 1] <- "Slovakia"
+life_data[which(grepl("^Trinidad", life_data$Country)), 1] <- "Trinidad"
+life_data[which(grepl("^St. Lucia", life_data$Country)), 1] <- "Saint Lucia"
+life_data[which(grepl("^St. Vincent", life_data$Country)), 1] <- "Saint Vincent"
+life_data[which(grepl("^Syrian", life_data$Country)), 1] <- "Syria"
+life_data[which(grepl("^Turkiye", life_data$Country)), 1] <- "Turkey"
+life_data[which(grepl("^United Kingdom", life_data$Country)), 1] <- "UK"
+life_data[which(grepl("^United States", life_data$Country)), 1] <- "USA"
+life_data[which(grepl("^Venezuela", life_data$Country)), 1] <- "Venezuela"
+life_data[which(grepl("^Yemen", life_data$Country)), 1] <- "Yemen"
+setdiff(life_data$Country, world_map$region)
+```
+
+```{r}
+## We found country names in the countries dataset
+## that do not match country names in the Life Expectancy dataset.
+
+setdiff(life_data$Country, countries$name)
+```
+
+```{r}
+## We changed the country names in the countries dataset
+## to match the country names in the Life Expectancy dataset.
+
+countries[which(grepl("DRC", countries$name)), 4] <- "Democratic Republic of the Congo"
+countries[which(grepl("^Congo", countries$name)), 4] <- "Republic of Congo"
+countries[which(grepl("^Myanmar", countries$name)), 4] <- "Myanmar"
+countries[which(grepl("Macedonia", countries$name)), 4] <- "North Macedonia"
+countries[which(grepl("São", countries$name)), 4] <- "Sao Tome and Principe"
+countries[which(grepl("United Kingdom", countries$name)), 4] <- "UK"
+countries[which(grepl("United States", countries$name)), 4] <- "USA"
+setdiff(life_data$Country, countries$name)
+```
+
+* Using these three datasets, we created a dataset (`mapdata`) to draw the map and a dataset (`lcdata`) to display the country-specific data via joins.
+  - `mapdata` : For drawing maps and representing statistics using ggplot's fill option.
+     + created a label to visually distinguish between Developed and Developing countries
+     + removed Antarctica from the map as it has no life expectancy data and does not need to be represented on the map.
+  - `lcdata` : For representing country-specific statistics as dots.
+
+```{r}
+mapdata <- left_join(world_map, life_data, by=c("region"="Country")) %>%
+  filter(region!="Antarctica") %>%
+  mutate(Economy_status_Developed_label
+         = ifelse(Economy_status_Developed==1, "Developed", "Developing")) %>%
+  mutate(Economy_status_Developed_label
+         = ifelse(is.na(Economy_status_Developed), "No Data", Economy_status_Developed_label))
+
+lcdata <- inner_join(life_data, countries, by=c("Country"="name"))
+```
+
+```{r}
+## We filled in the missing continents in the world_map dataset
+##to plot statistics by continent on a map.
+
+mapdata[which(grepl("Aruba", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("Anguilla", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("Andorra", mapdata$region)), "Region"] <- "European Union"
+mapdata[which(grepl("American Samoa", mapdata$region)), "Region"] <- "Oceania"
+mapdata[which(grepl("Saint Barthelemy", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("Ivory Coast", mapdata$region)), "Region"] <- "Africa"
+mapdata[which(grepl("Curacao", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("Cayman Islands", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("Dominica", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("Canary Islands", mapdata$region)), "Region"] <- "Africa"
+mapdata[which(grepl("Falkland Islands", mapdata$region)), "Region"] <- "South America"
+mapdata[which(grepl("Mayotte", mapdata$region)), "Region"] <- "Africa"
+mapdata[which(grepl("French Guiana", mapdata$region)), "Region"] <- "South America"
+mapdata[which(grepl("Martinique", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("Guadeloupe", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("Faroe Islands", mapdata$region)), "Region"] <- "European Union"
+mapdata[which(grepl("Guernsey", mapdata$region)), "Region"] <- "European Union"
+mapdata[which(grepl("Isle of Man", mapdata$region)), "Region"] <- "European Union"
+mapdata[which(grepl("Cocos Islands", mapdata$region)), "Region"] <- "Asia"
+mapdata[which(grepl("Christmas Island", mapdata$region)), "Region"] <- "Asia"
+mapdata[which(grepl("San Marino", mapdata$region)), "Region"] <- "European Union"
+mapdata[which(grepl("Jersey", mapdata$region)), "Region"] <- "European Union"
+mapdata[which(grepl("Siachen Glacier", mapdata$region)), "Region"] <- "Asia"
+mapdata[which(grepl("Nevis", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("Saint Kitts", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("Korea", mapdata$region)), "Region"] <- "Asia"
+mapdata[which(grepl("Kosovo", mapdata$region)), "Region"] <- "Rest of Europe"
+mapdata[which(grepl("Liechtenstein", mapdata$region)), "Region"] <- "European Union"
+mapdata[which(grepl("Saint Martin", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("Monaco", mapdata$region)), "Region"] <- "European Union"
+mapdata[which(grepl("Marshall Islands", mapdata$region)), "Region"] <- "Oceania"
+mapdata[which(grepl("Montserrat", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("New Caledonia", mapdata$region)), "Region"] <- "Oceania"
+mapdata[which(grepl("Norfolk Island", mapdata$region)), "Region"] <- "Oceania"
+mapdata[which(grepl("Niue", mapdata$region)), "Region"] <- "Oceania"
+mapdata[which(grepl("Bonaire", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("Sint Eustatius", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("Saba", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("Nauru", mapdata$region)), "Region"] <- "Oceania"
+mapdata[which(grepl("Palau", mapdata$region)), "Region"] <- "Asia"
+mapdata[which(grepl("Puerto Rico", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("Palestine", mapdata$region)), "Region"] <- "Middle East"
+mapdata[which(grepl("Western Sahara", mapdata$region)), "Region"] <- "Africa"
+mapdata[which(grepl("Sudan", mapdata$region)), "Region"] <- "Africa"
+mapdata[which(grepl("Saint Pierre and Miquelon", mapdata$region)), "Region"] <- "North America"
+mapdata[which(grepl("Sint Maarten", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("Turks and Caicos Islands", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("Taiwan", mapdata$region)), "Region"] <- "Asia"
+mapdata[which(grepl("Vatican", mapdata$region)), "Region"] <- "European Union"
+mapdata[which(grepl("Virgin Islands", mapdata$region)), "Region"] <- "Central America and Caribbean"
+mapdata[which(grepl("Wallis and Futuna", mapdata$region)), "Region"] <- "Oceania"
+```
+
+#### 2.2 Visualization
+
+##### 2.2.1 Visualization: shape of distribution
+
+* Histogram for all the variables to visualize the frequency distribution of each. After plotting histograms, we dropped `Measles`, `Under_five_deaths`, `Incidents_HIV` due to a lot of zero values. 
+
+```{r}
+gg1 <- ggplot(data=led) + geom_histogram(aes(x=Life_expectancy), bins = 30)
+gg2 <- ggplot(data=led) + geom_histogram(aes(x=Adult_mortality), bins = 30)
+gg3 <- ggplot(data=led) + geom_histogram(aes(x=Infant_deaths), bins = 30)
+gg4 <- ggplot(data=led) + geom_histogram(aes(x=Alcohol_consumption), bins = 30)
+gg5 <- ggplot(data=led) + geom_histogram(aes(x=percentage.expenditure), bins = 30)
+gg6 <- ggplot(data=led) + geom_histogram(aes(x=Hepatitis_B), bins = 30)
+gg7 <- ggplot(data=led) + geom_histogram(aes(x=Measles), bins = 30)
+gg8 <- ggplot(data=led) + geom_histogram(aes(x=BMI), bins = 30)
+gg9 <- ggplot(data=led) + geom_histogram(aes(x=Under_five_deaths), bins = 30)
+gg10 <- ggplot(data=led) + geom_histogram(aes(x=Polio), bins = 30)
+gg11 <- ggplot(data=led) + geom_histogram(aes(x=Total.expenditure), bins = 30)
+gg12 <- ggplot(data=led) + geom_histogram(aes(x=Income.composition.of.resources), bins = 30)
+gg13 <- ggplot(data=led) + geom_histogram(aes(x=Diphtheria), bins = 30)
+gg14 <- ggplot(data=led) + geom_histogram(aes(x=Incidents_HIV), bins = 30)
+gg15 <- ggplot(data=led) + geom_histogram(aes(x=GDP_per_capita), bins = 30)
+gg16 <- ggplot(data=led) + geom_histogram(aes(x=Population_mln), bins = 30)
+gg17 <- ggplot(data=led) + geom_histogram(aes(x=Thinness_ten_nineteen_years), bins = 30)
+gg18 <- ggplot(data=led) + geom_histogram(aes(x=Thinness_five_nine_years), bins = 30)
+gg19 <- ggplot(data=led) + geom_histogram(aes(x=Schooling), bins = 30)
+
+grid.arrange(gg1, gg2, gg3, gg4, gg5, gg6, gg7, gg8, gg9, ncol=3)
+grid.arrange(gg10, gg11, gg12, gg13, gg14,gg15, gg16, gg17, gg18, gg19, ncol=3)
+```
+
+##### 2.2.2 Life expectancy on the world map
+
+* Life expectancy by economic status : The map below separates developing and developed countries with a fill color, and the life expectancy for each country is represented by the color of the dots. You can see that developing countries have relatively shorter life expectancies, as the lighter colored dots representing shorter life expectancies are mostly on top of the green background representing developing countries.
+
+```{r}
+ggplot() +
+  geom_polygon(data=mapdata,
+               aes(x=long, y=lat, group=group, fill=Economy_status_Developed_label)) +
+  coord_fixed(1.3) +
+  scale_fill_manual(values=c("Developed"="#86B6F6", "Developing"="#65B741", "No Data"="#CCCCCC")) +
+  labs(fill = "Economy status") +
+  geom_point(data=lcdata, aes(x=longitude, y=latitude, color=Life_expectancy)) +
+  scale_color_gradient(low = "white", high = "red") +
+  ggtitle("Life expectancy by country on the world map")
+```
+
+###### Life expectancy by continent:
+
+* Life expectancy by economic status in Asia
+  - In Asia, Japan, the only developed country, has a life expectancy of 83.6, which is significantly higher than the developing countries in Asia.
+  - The average life expectancy in developing countries is 71.3 years, with a high of 82.5 years (Singapore) and a low of 63 years (Afghanistan).
+
+```{r}
+map_Asia <- filter(mapdata, Region=="Asia")
+dta_Asia <- filter(lcdata, Region=="Asia")
+
+ggplot() +
+  geom_polygon(data = map_Asia, 
+               aes(x = long, y = lat, group = group, 
+                   fill=Economy_status_Developed_label), 
+               color = "#777777") +
+  scale_fill_manual(values=c("Developed"="#86B6F6", "Developing"="#65B741", "No Data"="#CCCCCC")) +
+  labs(fill = "Economy status") +
+  geom_point(data=dta_Asia, aes(x=longitude, y=latitude, size=Life_expectancy), 
+             color="#FFB534", alpha=0.8) +
+  geom_text(data=dta_Asia, aes(x=longitude, y=latitude, label = Life_expectancy), 
+            size = 3, vjust = -0.5) +
+  ggtitle("Life expectancy by economic status in Asia") +
+  theme_void()
+```
+
+* Life expectancy by economic status in Oceania:
+  - The developed countries in Oceania are Australia and New Zealand, with life expectancies of 82.3 and 81.4 years, respectively, which are significantly higher than developing countries.
+  - In developing countries, the average life expectancy is 68.6 years, with a high of 72.5 years (Samoa) and a low of 63.2 years (Papua New Guinea).
+  
+```{r}
+map_Oceania <- filter(mapdata, Region=="Oceania")
+map_Oceania[which(map_Oceania$long < -100),]$long <- 
+  map_Oceania[which(map_Oceania$long < -100),]$long + 360
+dta_Oceania <- filter(lcdata, Region=="Oceania")
+dta_Oceania[which(dta_Oceania$longitude < -100),]$longitude <- 
+  dta_Oceania[which(dta_Oceania$longitude < -100),]$longitude + 360
+
+ggplot() +
+  geom_polygon(data = map_Oceania,
+               aes(x = long, y = lat, group = group, fill=Economy_status_Developed_label),
+               color = "#777777") +
+  scale_fill_manual(values=c("Developed"="#86B6F6", "Developing"="#65B741", "No Data"="#CCCCCC")) +
+  labs(fill = "Economy status") +
+  geom_point(data=dta_Oceania, aes(x=longitude, y=latitude, size=Life_expectancy)
+             , color="#FFB534", alpha=0.8) +
+  geom_text(data=dta_Oceania, aes(x=longitude, y=latitude, label=Life_expectancy)
+            , size = 3, vjust = -0.5) +
+  ggtitle("Life expectancy by economic status in Oceania") +
+  theme_void()
+```
+
+* Life expectancy by economic status in Middle East:
+  - Israel, the only developed country in the Middle East, has a life expectancy of 82.2 years.
+  - The average life expectancy in developing countries is 74.6 years, with a high of 79.6 years (Qatar) and a low of 66.1 years (Yemen).
+```{r}
+map_MiddleEast <- filter(mapdata, Region=="Middle East")
+dta_MiddleEast <- filter(lcdata, Region=="Middle East")
+
+ggplot() +
+  geom_polygon(data = map_MiddleEast, 
+               aes(x = long, y = lat, group = group, fill=Economy_status_Developed_label),
+               color = "#777777") +
+  scale_fill_manual(values=c("Developed"="#86B6F6", "Developing"="#65B741", "No Data"="#CCCCCC")) +
+  labs(fill = "Economy status") +
+  geom_point(data=dta_MiddleEast, aes(x=longitude, y=latitude, size=Life_expectancy), 
+             color="#FFB534", alpha=0.8) +
+  geom_text(data=dta_MiddleEast, aes(x=longitude, y=latitude, label = Life_expectancy), 
+            size = 3, vjust = -0.5) +
+  ggtitle("Life expectancy by economic status in Middle East") +
+  theme_void()
+```
+
+* Life expectancy by economic status in Europe:
+  - The countries that are part of the EU are all developed countries.
+  - They have an average life expectancy of 79.6 years, with a high of 83.2 years (Spain) and a low of 74.1 years (Latvia). 
+
+```{r}
+map_Europe <- filter(mapdata, Region=="European Union")
+dta_Europe <- filter(lcdata, Region=="European Union")
+
+ggplot() +
+  geom_polygon(data = map_Europe, 
+               aes(x = long, y = lat, group = group, fill=Economy_status_Developed_label),
+               color = "#777777") +
+  scale_fill_manual(values=c("Developed"="#86B6F6", "Developing"="#65B741", "No Data"="#CCCCCC")) +
+  labs(fill = "Economy status") +
+  geom_point(data=dta_Europe, aes(x=longitude, y=latitude, size=Life_expectancy), 
+             color="#FFB534", alpha=0.8) +
+  geom_text(data=dta_Europe, aes(x=longitude, y=latitude, label = Life_expectancy), 
+            size = 3, vjust = -0.5) +
+  ggtitle("Life expectancy by economic status in Europe") +
+  theme_void()
+```
+
+* Life expectancy by economic status in Rest of Europe:
+  - European countries that are not part of the EU that are developed include Iceland, Norway, Switzerland, and the UK.
+  - Switzerland has the highest life expectancy of these countries at 83.2 years, while the UK has the lowest life expectancy of the four developed countries at 81.3 years.
+  - The average life expectancy in developing countries is 74.1 years, with a high of 77.8 years (Albania) and a low of 70.7 years (Russia).
+
+```{r}
+map_RestEurope <- filter(mapdata, Region=="Rest of Europe")
+dta_RestEurope <- filter(lcdata, Region=="Rest of Europe")
+
+ggplot() +
+  geom_polygon(data = map_RestEurope, 
+               aes(x = long, y = lat, group = group, fill=Economy_status_Developed_label),
+               color = "#777777") +
+  scale_fill_manual(values=c("Developed"="#86B6F6", "Developing"="#65B741", "No Data"="#CCCCCC")) +
+  labs(fill = "Economy status") +
+  geom_point(data=dta_RestEurope, aes(x=longitude, y=latitude, size=Life_expectancy), 
+             color="#FFB534", alpha=0.8) +
+  geom_text(data=dta_RestEurope, aes(x=longitude, y=latitude, label = Life_expectancy), 
+            size = 3, vjust = -0.5) +
+  ggtitle("Life expectancy by economic status in Rest of Europe") +
+  theme_void()
+```
+
+* Life expectancy by economic status in Africa:
+  - African countries are all developing countries. The average life expectancy is 62 years, with a high of 75.9 years (Algeria) and a low of 49.9 years (Lesotho).
+
+```{r}
+map_Africa <- filter(mapdata, Region=="Africa")
+dta_Africa <- filter(lcdata, Region=="Africa")
+
+ggplot() +
+  geom_polygon(data = map_Africa, 
+               aes(x = long, y = lat, group = group, fill=Economy_status_Developed_label),
+               color = "#777777") +
+  scale_fill_manual(values=c("Developed"="#86B6F6", "Developing"="#65B741", "No Data"="#CCCCCC")) +
+  labs(fill = "Economy status") +
+  geom_point(data=dta_Africa, aes(x=longitude, y=latitude, size=Life_expectancy), 
+             color="#FFB534", alpha=0.8) +
+  geom_text(data=dta_Africa, aes(x=longitude, y=latitude, label = Life_expectancy), 
+            size = 3, vjust = -0.5) +
+  ggtitle("Life expectancy by economic status in Africa") +
+  theme_void()
+```
+
+* Life expectancy by economic status in North America:
+  - In Canada, a developed country, life expectancy is 81.8 years, the highest of the three countries in North America.
+  - The United States, another developed country, has a life expectancy of 78.8 years.
+  - Mexico, a developing country, has a life expectancy of 74.9 years, the lowest in North America.
+
+```{r}
+map_NorthAmerica <- filter(mapdata, Region=="North America" & long < 100)
+dta_NorthAmerica <- filter(lcdata, Region=="North America")
+
+ggplot() +
+  geom_polygon(data = map_NorthAmerica, 
+               aes(x = long, y = lat, group = group, fill=Economy_status_Developed_label),
+               color = "#777777") +
+  scale_fill_manual(values=c("Developed"="#86B6F6", "Developing"="#65B741", "No Data"="#CCCCCC")) +
+  labs(fill = "Economy status") +
+  geom_point(data=dta_NorthAmerica, aes(x=longitude, y=latitude, size=Life_expectancy), 
+             color="#FFB534", alpha=0.8) +
+  geom_text(data=dta_NorthAmerica, aes(x=longitude, y=latitude, label = Life_expectancy), 
+            size = 3, vjust = -0.5) +
+  ggtitle("Life expectancy by economic status in North America") +
+  theme_void()
+```
+
+* Life expectancy by economic status in Central America and Caribbean:
+  - The countries in Central America and the Caribbean are all developing countries. 
+  - The average life expectancy is 73.9 years, with a high of 79.4 years (Costa Rica) and a low of 62.1 years (Haiti).
+```{r}
+map_CentralAmerica <- filter(mapdata, Region=="Central America and Caribbean" & long < 0)
+dta_CentralAmerica <- filter(lcdata, Region=="Central America and Caribbean" & longitude < 0)
+
+ggplot() +
+  geom_polygon(data = map_CentralAmerica, 
+               aes(x = long, y = lat, group = group, fill=Economy_status_Developed_label),
+               color = "#777777") +
+  scale_fill_manual(values=c("Developed"="#86B6F6", "Developing"="#65B741", "No Data"="#CCCCCC")) +
+  labs(fill = "Economy status") +
+  geom_point(data=dta_CentralAmerica, aes(x=longitude, y=latitude, size=Life_expectancy), 
+             color="#FFB534", alpha=0.8) +
+  geom_text(data=dta_CentralAmerica, aes(x=longitude, y=latitude, label = Life_expectancy), 
+            size = 3, vjust = -0.5) +
+  ggtitle("Life expectancy by economic status in Central America and Caribbean") +
+  theme_void()
+```
+
+* Life expectancy by economic status in South America:
+  - The countries in South America are all developing countries.
+  - The average life expectancy is 74.3 years, with a high of 79.5 years (Chile) and a low of 69 years (Guyana)
+  
+```{r}
+map_SouthAmerica <- filter(mapdata, Region=="South America")
+dta_SouthAmerica <- filter(lcdata, Region=="South America")
+
+ggplot() +
+  geom_polygon(data = map_SouthAmerica, 
+               aes(x = long, y = lat, group = group, fill=Economy_status_Developed_label),
+               color = "#777777") +
+  scale_fill_manual(values=c("Developed"="#86B6F6", "Developing"="#65B741", "No Data"="#CCCCCC")) +
+  labs(fill = "Economy status") +
+  geom_point(data=dta_SouthAmerica, aes(x=longitude, y=latitude, size=Life_expectancy), 
+             color="#FFB534", alpha=0.8) +
+  geom_text(data=dta_SouthAmerica, aes(x=longitude, y=latitude, label = Life_expectancy), 
+            size = 3, vjust = -0.5) +
+  ggtitle("Life expectancy by economic status in South America") +
+  theme_void()
+```
+
+
+##### 2.2.3 Boxplots by region for each variable
+
+* `Life_expectancy`: Life expectancy by region. The boxplot displays life expectancy distributions across different global regions. The central box of each plot indicates the middle 50% of data, the line within represents the median, and the "whiskers" show the typical range. Regions like the European Union have high life expectancies, whereas Africa has a lower median and more variability, with outliers indicating extremes.
+
+```{r}
+ggplot(data=led) +
+  geom_boxplot(aes(x=reorder(Region, Life_expectancy, FUN = median), y=Life_expectancy)) +
+  xlab("Region") +
+  coord_flip()
+```
+
+* `Region`: countries are distributed in 9 regions. The length of each bar represents the number of countries in each region (or continent), and the green color of the bars represents developing countries and the blue color represents developed countries. The Africa region has the most countries and they are all developing countries. In contrast to most regions having developing countries, all countries in the European Union region are developed countries, showing the extreme differences in economic status across regions.
+
+```{r}
+led_bar <-
+  mutate(led, Economy_status = ifelse(Economy_status_Developed==0, "Developing", "Developed"))
+ggplot(data=led_bar) +
+  geom_bar(aes(x=Region, fill=as.factor(Economy_status))) +
+  scale_fill_manual(values=c("Developed"="#86B6F6", "Developing"="#65B741")) +
+  labs(fill = "Economy status") + ylab("The number of countries") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom") + 
+  coord_flip()
+```
+
+* `Economy_status_Developed`: 0 indicates it is a developing country while 1 indicates that it is a developed country. Of the 178 countries, 37 are developed, accounting for 26%, or about a quarter of all countries.
+
+```{r}
+ggplot(data=led_bar, aes(x=Economy_status)) +
+  geom_bar(aes(fill=Economy_status)) +
+  scale_fill_manual(values=c("Developed"="#86B6F6", "Developing"="#65B741")) +
+  geom_text(stat = 'count', size = 5, aes(label = after_stat(count)), vjust=2) +
+  xlab("Economy status") + ylab("The number of countries")
+```
+
+* `Adult_mortality`: Represents deaths of adults per 1000 population. The boxplot shows significant regional variations, with Africa showing a particularly high range and outliers indicating extreme mortality rates.
+
+```{r}
+ggplot(data=led) +
+  geom_boxplot(aes(x=reorder(Region, Adult_mortality, FUN = median), y=Adult_mortality)) +
+  xlab("Region") +
+  coord_flip()
+```
+
+* `Infant_deaths`: Represents infant deaths per 1000 population. The boxplot layout allows easy comparison of infant mortality between these diverse regions. It shows median rates, the spread of the data, and outliers, with Africa displaying a notably wide range and higher rates of infant deaths compared to other regions. 
+
+```{r}
+ggplot(data=led) +
+  geom_boxplot(aes(x=reorder(Region, Infant_deaths, FUN = median), y=Infant_deaths)) +
+  xlab("Region") +
+  coord_flip()
+```
+
+* `Alcohol_consumption`: The boxplot chart compares alcohol consumption, measured in liters of pure alcohol per capita for individuals aged 15 and older, across various global regions. The median consumption varies by region, with the European Union at the higher end and the Middle East at the lower. Outliers in several regions suggest significant variations from the median within those populations.
+
+```{r}
+ggplot(data=led) +
+  geom_boxplot(aes(x=reorder(Region, Alcohol_consumption, FUN = median), y=Alcohol_consumption)) +
+  xlab("Region") +
+  coord_flip()
+```
+
+* `percentage.expenditure`: The boxplot chart that displays health expenditure as a percentage of Gross Domestic Product (GDP) per capita across different regions. The European Union has the widest range of expenditures, but even within that region, you can see that some countries, represented by outliers, have extremely high expenditures. The highest expenditure country is Switzerland, which is not part of the European Union. Africa has the lowest average expenditure, even when comparing outliers to other regions.
+
+```{r}
+ggplot(data=led) +
+  geom_boxplot(aes(x=reorder(Region, percentage.expenditure, FUN = median)
+                   , y=percentage.expenditure)) +
+  xlab("Region") +
+  coord_flip()
+```
+
+* `Hepatitis_B`: The boxplot chart showcases the percentage coverage of Hepatitis B immunization among 1-year-olds in various regions. North America and the European Union show high median coverage rates with relatively small interquartile ranges, while Africa exhibits lower coverage rates with greater variability. Some regions have outliers, showing that even within the same region, there are areas with low hepatitis B immunization rates.
+
+```{r}
+ggplot(data=led) +
+  geom_boxplot(aes(x=reorder(Region, Hepatitis_B, FUN = median), y=Hepatitis_B)) +
+  xlab("Region") +
+  coord_flip()
+```
+
+* `BMI`: The boxplot illustrates the average Body Mass Index (BMI) across various regions. The regions show varying levels of BMI, with some like Oceania and North America exhibiting higher median BMIs, and others like Africa having lower median values with outliers representing extremely low BMIs.
+
+```{r}
+ggplot(data=led) +
+  geom_boxplot(aes(x=reorder(Region, BMI, FUN = median), y=BMI)) +
+  xlab("Region") +
+  coord_flip()
+```
+
+* `Polio`: The boxplot displays the percentage of 1-year-olds who have received the polio vaccine across various regions. Most regions have high median immunization coverage with some showing more variability than others. The outliers in some regions show that there are countries with low immunization rates, but they are few in number.
+
+```{r}
+ggplot(data=led) +
+  geom_boxplot(aes(x=reorder(Region, Polio, FUN = median), y=Polio)) +
+  xlab("Region") +
+  coord_flip()
+```
+
+* `Total.expenditure`: The boxplot depicts the percentage of total government expenditure dedicated to health across various regions. It shows a wide range of health spending percentages, with some regions like the European Union displaying higher median expenditures and significant outliers indicating both higher and lower spending levels. Regions like Asia and the Middle East show lower median government health expenditures with fewer outliers.
+
+```{r}
+ggplot(data=led) +
+  geom_boxplot(aes(x=reorder(Region, Total.expenditure, FUN = median)
+                   , y=Total.expenditure)) +
+  xlab("Region") +
+  coord_flip()
+```
+
+* `Income.composition.of.resources`: The boxplot that visualizes the distribution of DTP3 immunization coverage among 1-year-olds across various regions. Regions like North America and the European Union exhibit high median immunization coverage with relatively little variability, while Africa shows lower median coverage and greater variability, with some outliers indicating very low coverage rates.
+
+```{r}
+ggplot(data=led) +
+  geom_boxplot(aes(x=reorder(Region, Income.composition.of.resources, FUN = median),
+                   y=Income.composition.of.resources)) +
+  xlab("Region") +
+  coord_flip()
+```
+
+* `Diphtheria`: The boxplot illustrates the incidence of HIV per 1000 population aged 15-49 across various regions. Countries in all regions except Oceania have an average incidence rate above 80%. This indicates that HIV incidence in the 15-49 age group does not have a significant impact on life expectancy.
+
+```{r}
+ggplot(data=led) +
+  geom_boxplot(aes(x=reorder(Region, Diphtheria, FUN = median), y=Diphtheria)) +
+  xlab("Region") +
+  coord_flip()
+```
+
+* `GDP_per_capita`: The boxplot visualizes the GDP per capita in USD across various regions, with each box indicating the spread of GDP values within that region. North America and the European Union display higher medians and wider ranges, indicating more variability, while Africa shows the lowest median GDP per capita. The country with the highest GDP per capita is Luxembourg in the European Union, and the lowest is Burundi in Africa.
+
+```{r}
+ggplot(data=led) +
+  geom_boxplot(aes(x=reorder(Region, GDP_per_capita, FUN = median), y=GDP_per_capita)) +
+  xlab("Region") +
+  coord_flip()
+```
+
+* `Population_mln`: The boxplots depicts total population in millions for various global regions. The two outliers with the most extreme population numbers in Asia are India and China. As of 2014, China has a population of 1.37 billion and India has a population of 1.29 billion. If we exclude these two countries and re-draw the boxplot, we see that North America has the largest population and Oceania has the smallest.
+
+```{r}
+gg1 <- ggplot(data=led) +
+  geom_boxplot(aes(x=reorder(Region, Population_mln, FUN = median), y=Population_mln)) +
+  xlab("Region") +
+  coord_flip()
+
+led_pop <- filter(led, Population_mln < 1000)
+
+gg2 <- ggplot(data=led_pop) +
+  geom_boxplot(aes(x=reorder(Region, Population_mln, FUN = median), y=Population_mln)) +
+  xlab("Region") +
+  coord_flip()
+
+grid.arrange(gg1, gg2, nrow=2)
+```
+
+* `Thinness_ten_nineteen_years`: The boxplot that compares the prevalence of thinness among adolescents aged 10-19 across various regions. The Africa region has a high median and narrow interquartile range, suggesting that youth in Africa are similarly thin across the region. Asia, on the other hand, has a wide interquartile range, indicating that there is a lot of variability in body shape among adolescents, even within the same region. However, we can still see that adolescents in this region have a thinner body shape compared to all other regions except Africa. The region with the largest average body shape among teens is Oceania.
+
+```{r}
+ggplot(data=led) +
+  geom_boxplot(aes(x=reorder(Region, Thinness_ten_nineteen_years, FUN = median)
+                   , y=Thinness_ten_nineteen_years)) +
+  xlab("Region") +
+  coord_flip()
+```
+
+* `Thinness_five_nine_years` : The boxplot shows the prevalence of thinness among children aged 5-9 years across various regions, where thinness is defined as a BMI less than -2 standard deviations below the median. Asia shows a higher prevalence and wider spread of thinness, while North America, Oceania and the European Union have lower medians indicating a smaller prevalence of thinness in these regions.
+
+```{r}
+ggplot(data=led) +
+  geom_boxplot(aes(x=reorder(Region, Thinness_five_nine_years, FUN = median)
+                   , y=Thinness_five_nine_years)) +
+  xlab("Region") +
+  coord_flip()
+```
+
+* `Schooling`: The boxplot displays the average years of schooling for people aged 25 and older across various global regions. The data shows that North America and Europe have high averages and low variability, indicating high years of schooling overall, but other regions have high variability, indicating that there is significant variation in years of schooling among countries in each region. Africa shows the lowest average number of years of schooling.
+
+```{r}
+ggplot(data=led) +
+  geom_boxplot(aes(x=reorder(Region, Schooling, FUN = median), y=Schooling)) +
+  xlab("Region") +
+  coord_flip()
+```
+
+##### 2.2.4 Relationship between variables
+
+* Scatterplots : The scatterplots correlate life expectancy with various factors: higher adult mortality, infant and under-five deaths, and BMI generally associate with lower life expectancy, while increased Hepatitis B and polio vaccinations align with higher life expectancy. Alcohol consumption and measles cases display no clear pattern, and the impact of health expenditure on life expectancy is ambiguous, with a cluster of high life expectancy at lower expenditure levels.
+The scatterplots also show that higher life expectancy is generally associated with higher income, education levels, and immunization coverage, while negative correlations are observed with higher HIV prevalence and thinness among children and adolescents. Total health expenditure and population size do not exhibit a clear relationship with life expectancy.
+
+```{r}
+gg1 <- ggplot(data=led) + geom_point(aes(x=Adult_mortality, y=Life_expectancy))
+gg2 <- ggplot(data=led) + geom_point(aes(x=Infant_deaths, y=Life_expectancy))
+gg3 <- ggplot(data=led) + geom_point(aes(x=Alcohol_consumption, y=Life_expectancy))
+gg4 <- ggplot(data=led) + geom_point(aes(x=percentage.expenditure, y=Life_expectancy))
+gg5 <- ggplot(data=led) + geom_point(aes(x=Hepatitis_B, y=Life_expectancy))
+gg6 <- ggplot(data=led) + geom_point(aes(x=Measles, y=Life_expectancy))
+gg7 <- ggplot(data=led) + geom_point(aes(x=BMI, y=Life_expectancy))
+gg8 <- ggplot(data=led) + geom_point(aes(x=Under_five_deaths, y=Life_expectancy))
+gg9 <- ggplot(data=led) + geom_point(aes(x=Polio, y=Life_expectancy))
+gg10 <- ggplot(data=led) + geom_point(aes(x=Total.expenditure, y=Life_expectancy))
+gg11 <- ggplot(data=led) + geom_point(aes(x=Income.composition.of.resources, y=Life_expectancy))
+gg12 <- ggplot(data=led) + geom_point(aes(x=Diphtheria, y=Life_expectancy))
+gg13 <- ggplot(data=led) + geom_point(aes(x=Incidents_HIV, y=Life_expectancy))
+gg14 <- ggplot(data=led) + geom_point(aes(x=GDP_per_capita, y=Life_expectancy))
+gg15 <- ggplot(data=led) + geom_point(aes(x=Population_mln, y=Life_expectancy))
+gg16 <- ggplot(data=led) + geom_point(aes(x=Thinness_ten_nineteen_years, y=Life_expectancy))
+gg17 <- ggplot(data=led) + geom_point(aes(x=Thinness_five_nine_years, y=Life_expectancy))
+gg18 <- ggplot(data=led) + geom_point(aes(x=Schooling, y=Life_expectancy))
+
+grid.arrange(gg1, gg2, gg3, gg4, gg5, gg6, gg7, gg8, gg9, ncol=3)
+grid.arrange(gg10, gg11, gg12, gg13, gg14, gg15, gg16, gg17, gg18, ncol=3)
+```
+
+* Correlation Matrix
+
+```{r}
+cor_led <- cor(select(led, c(-Country,-Region, -Incidents_HIV, -Under_five_deaths, -Measles)))
+ggcorrplot(cor_led, lab = TRUE, lab_size=2, tl.cex = 7,
+           sig.level = 0.05, digits = 2,
+           colors = c("#7d9ea2", "white", "#f26835"))
+```
+
+This correlation matrix depicts the relationships between a variety of health, economic, and demographic variables. Notably, there is a strong negative correlation between Adult Mortality and both Life Expectancy (-0.95) and Economy Status - Developed (-0.48), suggesting higher adult mortality rates are linked with lower life expectancy and less developed economies. Conversely, Schooling positively correlates with GDP per Capita (0.6) and Life Expectancy (0.77), indicating that higher education levels are associated with wealthier economies and longer lives. Additionally, Infant Deaths strongly correlate with Adult Mortality (0.85) and negatively with Life Expectancy (-0.93), reflecting the inter connectedness of health indicators. Alcohol consumption, while moderately negatively correlated with Adult Mortality (-0.27), shows a surprisingly positive correlation with Schooling (0.66), hinting at complex socioeconomic dynamics.
+
+
+* We drop `Infant_deaths` due to high correlation value 0.85 with `Adult_mortality.`
+* We drop `Thinness_ten_nineteen_years` due to high correlation value 0.95 with `Thinness_five_nine_years`
+
+```{r}
+cor_led <- cor(select(led, c(-Country,-Region, -Incidents_HIV, -Under_five_deaths, -Measles
+                             , -Infant_deaths, -Thinness_ten_nineteen_years)))
+ggcorrplot(cor_led, lab = TRUE, lab_size=2, tl.cex = 7,
+           sig.level = 0.05, digits = 2,
+           colors = c("#7d9ea2", "white", "#f26835"))
+```
+
+
+
+Economy Status - Developed: This has a strong positive correlation with Life Expectancy (0.57) and a strong negative correlation with Adult Mortality (-0.48). This suggests that in more developed economies, life expectancy is higher and adult mortality rates are lower.
+
+Adult Mortality: There's a very strong negative correlation with Life Expectancy (-0.95) indicating that as adult mortality rates decrease, life expectancy increases.
+
+Schooling: There is a strong positive correlation with GDP per Capita and Life Expectancy, and a strong negative correlation with Adult Mortality. This could imply that higher levels of schooling are associated with higher GDP and longer life expectancy, and lower adult mortality rates.
+
+Alcohol Consumption: Interestingly, this variable shows a strong positive correlation with Schooling and a moderate positive correlation with Life Expectancy (0.43). The positive correlation with schooling may be indicative of socio-economic factors rather than a direct causative relationship.
+
+GDP per Capita: It has a strong positive correlation with Schooling (0.6) and Life Expectancy , and a moderate negative correlation with Thinness in five-nine-years (-0.4), suggesting that higher GDP per capita is associated with better education outcomes, higher life expectancy, and lower rates of underweight children.
+
+BMI: There is a positive correlation with Economy Status - Developed (0.31), which might suggest that higher BMIs are more common in developed countries.
+
+
+
+
+
+##### 2.2.5 Comparison across groups
+
+* Developed and developing : The scatterplots contrast life expectancy with various health-related indicators, distinguishing between developed (likely in blue) and developing countries (likely in black). 
+
+```{r}
+gg <- ggplot(data=led, aes(y=Life_expectancy, color=Economy_status_Developed)) +
+  theme(legend.position = "none")
+gg1 <- gg + geom_point(aes(x=Adult_mortality))
+gg2 <- gg + geom_point(aes(x=Infant_deaths))
+gg3 <- gg + geom_point(aes(x=Alcohol_consumption))
+gg4 <- gg + geom_point(aes(x=percentage.expenditure))
+gg5 <- gg + geom_point(aes(x=Hepatitis_B))
+gg6 <- gg + geom_point(aes(x=Measles))
+gg7 <- gg + geom_point(aes(x=BMI))
+gg8 <- gg + geom_point(aes(x=Under_five_deaths))
+gg9 <- gg + geom_point(aes(x=Polio))
+gg10 <- gg + geom_point(aes(x=Total.expenditure))
+gg11 <- gg + geom_point(aes(x=Income.composition.of.resources))
+gg12 <- gg + geom_point(aes(x=Diphtheria))
+gg13 <- gg + geom_point(aes(x=Incidents_HIV))
+gg14 <- gg + geom_point(aes(x=GDP_per_capita))
+gg15 <- gg + geom_point(aes(x=Population_mln))
+gg16 <- gg + geom_point(aes(x=Thinness_ten_nineteen_years))
+gg17 <- gg + geom_point(aes(x=Thinness_five_nine_years))
+gg18 <- gg + geom_point(aes(x=Schooling))
+
+grid.arrange(gg1, gg2, gg3, gg4, gg5, gg6, gg7, gg8, gg9, ncol=3)
+grid.arrange(gg10, gg11, gg12, gg13, gg14, gg15, gg16, gg17, gg18, ncol=3)
+```
+
+Developed countries show higher life expectancy and lower rates of adult mortality, infant deaths, and under-five deaths. These countries also have higher Hepatitis B and polio immunization rates, higher health expenditure percentages, and lower incidence of measles. Body Mass Index (BMI) distributions appear similar across developed and developing countries. Alcohol consumption does not display a distinct pattern relative to development status. The scatterplots also highlight the differences in life expectancy between developed and developing countries, showing that developed countries often have higher life expectancy associated with higher GDP per capita, education, and immunization rates, and lower HIV incidents and prevalence of thinness among children and adolescents.
+
+
+```{r}
+led %>%
+  group_by(Economy_status_Developed) %>%
+  summarise(Countries = n()) %>%
+  mutate(Economy_status = ifelse(Economy_status_Developed==0, "Developing", "Developed")) %>%
+  select(c(Economy_status, Countries))
+```
+
+#### 2.3 Generate hypothesis       
+
+If we were to generate a hypothesis test for our modeling, it would be such that , null hypothesis equals to that regression coefficients of the all predictors are equal to zero. While alternate hypothesis equals that at least one of the coefficient is not equal to zero.
+This test aims to determine whether the overall regression model is meaningful in explaining variations in Life Expectancy, thereby providing insights into the relationships between the all predictors and the Life Expectancy.
+
+
+$$ H0: = \beta_1 = \beta_2 = ... = \beta_q = 0$$
+$$ H1: \text{at least one } \beta_j \neq 0, \: q < j \leq p $$
+
+### 3. Model building
+
+In our modeling approach, we intend to employ various methods and models to identify the optimal predictive model for Life Expectancy. 
+
+To evaluate our chosen model's performance we want to create an unseen data. For that, we  partitioned the original dataset into training and testing subsets. We split the dataset based on the target variable Life_expectancy with a partition ratio of 80% for the training set and 20% for the testing set (p = 0.8). 
+
+```{r}
+set.seed(123) # For reproducibility
+partition <- createDataPartition(led$Life_expectancy, p = 0.8, list = FALSE)
+trainingSet <- led[partition, ]
+testSet <- led[-partition, ]
+```
+
+
+#### 3.1 Statistical models
+
+For our predictive modleing, we will be running three types of models to find best predictors for Life Expectancy: 
+(1) Multiple linear regression is a fundamental statistical method used to explore the relationship between a dependent variable and multiple independent variables by fitting a linear equation to the observed data. 
+(2) Forward selection is a step wise regression approach that begins with an empty model and adds predictors based on their contribution to the model's performance, typically evaluated using metrics like Akaike Information Criterion (AIC) or Bayesian Information Criterion (BIC). This method aims to find the most relevant subset of predictors to maximize predictive accuracy while minimizing complexity. 
+(3) Lasso regression is a regularization technique that combines the features of multiple linear regression with a penalty term to shrink the coefficient estimates towards zero, effectively performing variable selection by forcing insignificant coefficients to be exactly zero.
+
+
+First we will be running the models, then predicting our outcome variable using test data, calculating its evaluation metrics and then will select one model based on the best evaluation metrics. 
+
+
+## Multiple Linear Regresssion
+
+# 1. using all predictors
+```{r}
+#Multi Linear Regression Model
+mlrModel <- lm(Life_expectancy ~ Economy_status_Developed + Adult_mortality + Infant_deaths 
+               + Alcohol_consumption + percentage.expenditure + Hepatitis_B + Measles + BMI + Under_five_deaths + Polio + Total.expenditure + Income.composition.of.resources + Diphtheria + Incidents_HIV + GDP_per_capita + Population_mln + Thinness_ten_nineteen_years + Thinness_five_nine_years + Schooling, data = trainingSet)
+```
+
+```{r}
+# Proceed with prediction
+testSet$predictions <- predict(mlrModel, newdata = testSet)
+summary(mlrModel)
+```
+The baseline model has a adj.R^2 value of 97.18% which is a good measure of variation explained in Life Expectancy by the predictors. But since this model had 19 predictors we think there might be a curse of dimenisonality where this model might be overfitting. To deal with this issue we calculated the evaluation metrics such as MAE, MSE and RMSE. 
+
+    
+```{r}
+# Calculate evaluation metrics
+MAE <- mean(abs(testSet$predictions - testSet$Life_expectancy))
+MSE <- mean((testSet$predictions - testSet$Life_expectancy)^2)
+RMSE <- sqrt(MSE)
+
+# Print the metrics
+print(paste("MAE:", MAE))
+print(paste("MSE:", MSE))
+print(paste("RMSE:", RMSE))
+
+```
+
+
+```{r}
+par(mfrow = c(2, 2)) # Set up the plotting area to display 2 rows of 2 plots each
+
+# Plot 1: Residuals vs Fitted Values
+plot(fitted(mlrModel), resid(mlrModel),
+     xlab = "Fitted Values",
+     ylab = "Residuals",
+     main = "Residuals vs Fitted Values")
+abline(h = 0, col = "red") 
+
+# Plot 2: Normal Q-Q Plot
+qqnorm(resid(mlrModel),
+       main = "Normal Q-Q Plot")
+qqline(resid(mlrModel)) # Add a reference line
+
+# Reset the plotting area back to default (1x1)
+par(mfrow = c(1, 1))
+```
+
+```{r}
+ggplot(data = data.frame(Fitted = mlrModel$fitted.values, Residuals = resid(mlrModel)), aes(x = Fitted, y = Residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(x = "Fitted Values", y = "Residuals", title = "Residuals vs Fitted Values Plot for mlrModel") +
+  theme_minimal()
+```
+
+# 2. using only significant predictors
+
+To reduce the dimensionality, we opted to make another model with only the significant predictors. These predictors are `Adult_mortality`, `Infant_deaths`, `Alcohol_consumption`, `Measles`, `Polio`, `Income.composition.of.resources`, `Incidents_HIV` and `GDP_per_capita`. 
+
+```{r}
+#Multi Linear Regression Model
+mlrModel2 <- lm(Life_expectancy ~ Adult_mortality + Infant_deaths 
+               + Alcohol_consumption+ Measles + Polio+ Income.composition.of.resources+ Incidents_HIV + GDP_per_capita , data = trainingSet)
+```
+
+```{r}
+# Proceed with prediction
+testSet$predictions2 <- predict(mlrModel2, newdata = testSet)
+summary(mlrModel2)
+```
+    
+To evaluate this second model, we calculated the evaluation metrics again. These metrics are much lower than the first baseline model.
+
+```{r}
+# Calculate evaluation metrics
+MAE <- mean(abs(testSet$predictions2 - testSet$Life_expectancy))
+MSE <- mean((testSet$predictions2 - testSet$Life_expectancy)^2)
+RMSE <- sqrt(MSE)
+
+# Print the metrics
+print(paste("MAE:", MAE))
+print(paste("MSE:", MSE))
+print(paste("RMSE:", RMSE))
+
+```
+
+
+```{r}
+par(mfrow = c(2, 2)) # Set up the plotting area to display 2 rows of 2 plots each
+
+# Plot 1: Residuals vs Fitted Values
+plot(fitted(mlrModel2), resid(mlrModel2),
+     xlab = "Fitted Values",
+     ylab = "Residuals",
+     main = "Residuals vs Fitted Values")
+abline(h = 0, col = "red") 
+
+# Plot 2: Normal Q-Q Plot
+qqnorm(resid(mlrModel2),
+       main = "Normal Q-Q Plot")
+qqline(resid(mlrModel2)) # Add a reference line
+
+# Reset the plotting area back to default (1x1)
+par(mfrow = c(1, 1))
+```
+
+```{r}
+ggplot(data = data.frame(Fitted = mlrModel2$fitted.values, Residuals = resid(mlrModel2)), aes(x = Fitted, y = Residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(x = "Fitted Values", y = "Residuals", title = "Residuals vs Fitted Values Plot for mlrModel2") +
+  theme_minimal()
+```
+
+## Forward selection
+
+For forward selection, we ran an empty model with no predictors all the way to the full model with all predictors. The model combination that had the lowest AIC = 117.68 with predictors `Adult_mortality`, `Infant_deaths` , `Economy_status_Developed`,`GDP_per_capita`, `Alcohol_consumption` , `Incidents_HIV`, `Income.composition.of.resources`,`Polio`, `Measles` and `Total.expenditure`. 
+
+```{r}
+# Minimal model: only intercept (no predictors)
+minimalModel <- lm(Life_expectancy ~ 1, data = led)
+
+# Full model: includes all potential predictors
+fullModel <- lm(Life_expectancy ~  Economy_status_Developed + Adult_mortality + Infant_deaths 
+               + Alcohol_consumption + percentage.expenditure + Hepatitis_B + Measles + BMI + Under_five_deaths + Polio + Total.expenditure + Income.composition.of.resources + Diphtheria + Incidents_HIV + GDP_per_capita + Population_mln + Thinness_ten_nineteen_years + Thinness_five_nine_years + Schooling , data = led)
+
+```
+
+```{r}
+# Display the selected model
+summary(minimalModel)
+```
+
+```{r}
+
+# Perform forward selection
+forwardModel <- step(object = minimalModel, scope = list(lower = minimalModel, upper = fullModel), direction = "forward")
+
+# Display the selected model
+summary(forwardModel)
+```
+Then we ran a multiple linear regression model for the predictors selected by the Forward Selection and its adj.R^2 was 97.14%. 
+
+
+## LASSO
+
+Using the LASSO regression method to find the best combination of predictors. 
+
+```{r, warning=FALSE}
+subled <- select(led, c(-Country, -Region, -Incidents_HIV, -Under_five_deaths, -Measles, -Infant_deaths, -Thinness_ten_nineteen_years))
+x <- model.matrix(Life_expectancy ~ ., subled)[, -1]
+y <- led$Life_expectancy
+set.seed(1)
+train <- sample(1:nrow(x), nrow(x) / 2)
+test <- (-train)
+y.test <- y[test]
+
+grid <- 10^seq(10, -2, length = 100)
+lasso.mod <- glmnet(x[train, ], y[train], alpha = 1,lambda = grid)
+plot(lasso.mod)
+
+set.seed(1)
+cv.out <- cv.glmnet(x[train, ], y[train], alpha = 1)
+plot(cv.out)
+
+bestlam <- cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s = bestlam,newx = x[test, ])
+mean((lasso.pred - y.test)^2)
+
+out <- glmnet(x, y, alpha=1, lambda = grid)
+lasso.coef <- predict(out, type="coefficients", s=bestlam)
+lasso.coef
+```
+
+The best predictors it gave us were `Income.composition.of.resources`,`Schooling`,`Alcohol_consumption`,`Economy_status_Developed`,`Adult_mortality`,`Total.expenditure`,`Diphtheria`,`Thinness_five_nine_years` and `GDP_per_capita`. The model using Lasso, the adj.R^2 is 95.31% which is lower than our MLR models.
+
+```{r}
+model.lasso <- lm(Life_expectancy~Income.composition.of.resources+Schooling+Alcohol_consumption+Economy_status_Developed+Adult_mortality+Total.expenditure+Diphtheria+Thinness_five_nine_years+GDP_per_capita, data=led)
+
+summary(model.lasso)
+```
+
+```{r, warning=FALSE}
+dx <- tibble(predictions = model.lasso$fitted.values,
+             residuals = model.lasso$residuals)
+ggplot(dx, aes(x = predictions, y = residuals)) + geom_point() + geom_smooth(se = F) + 
+  geom_hline(yintercept = 0, linetype = 2)
+```
+### 4. Conclusion:
+
+```{r}
+final_model <- lm(Life_expectancy ~ Adult_mortality + Infant_deaths 
+               + Alcohol_consumption+ Measles + Polio+ Income.composition.of.resources+ Incidents_HIV + GDP_per_capita , data = led)
+
+summary(final_model)
+```
+To conclude, the best predictors that explain Life_Expectancy `Adult_mortality`, `Infant_deaths`, `Alcohol_consumption`, `Measles`, `Polio`, `Income.composition.of.resources`, `Incidents_HIV` and `GDP_per_capita`. They explain 97.02% of variation in Life_Expectancy.
+
+For a country to have higher life expectancy, it needs to have  lower `Adult_mortality`, lower `Infant_deaths`, higher `Alcohol_consumption`, more cases of `Measles`, lower `Polio` cases, higher `Income.composition.of.resources`, higher `Incidents_HIV` and higher `GDP_per_capita`. They explain 97.02% of variation in Life_Expectancy.
